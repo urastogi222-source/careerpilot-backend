@@ -1,4 +1,3 @@
-# main.py - CareerPilot AI Complete Backend
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -12,6 +11,8 @@ import bcrypt
 import jwt
 import os
 import re
+import secrets
+import string
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -123,6 +124,15 @@ class ATSAnalysis(Base):
     
     user = relationship("User", back_populates="ats_analyses")
 
+class PasswordReset(Base):
+    __tablename__ = "password_resets"
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(200), index=True)
+    token = Column(String(200), unique=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, default=lambda: datetime.utcnow() + timedelta(hours=1))
+    used = Column(Boolean, default=False)
+
 Base.metadata.create_all(bind=engine)
 
 # ========== Schemas ==========
@@ -231,6 +241,10 @@ def get_admin_user(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
 
+def generate_random_password(length=10):
+    characters = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(characters) for _ in range(length))
+
 # ========== Resume Analysis ==========
 def analyze_resume_text(text: str, role: str) -> Dict[str, Any]:
     text_lower = text.lower()
@@ -293,7 +307,7 @@ def analyze_resume_text(text: str, role: str) -> Dict[str, Any]:
     }
 
 # ========== FastAPI App ==========
-app = FastAPI(title="CareerPilot AI API")
+app = FastAPI(title="CareerPilot API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -324,6 +338,47 @@ def login(user_data: UserLogin, db: Session = Depends(SessionLocal)):
 @app.get("/api/auth/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
     return UserResponse.model_validate(current_user)
+
+# ========== Password Reset Routes ==========
+@app.post("/api/auth/forgot-password")
+def forgot_password(email: str, db: Session = Depends(SessionLocal)):
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        return {"message": "If your email is registered, you will receive a reset link"}
+    
+    db.query(PasswordReset).filter(PasswordReset.email == email).delete()
+    
+    token = secrets.token_urlsafe(32)
+    reset = PasswordReset(email=email, token=token)
+    db.add(reset)
+    db.commit()
+    
+    reset_link = f"https://glittery-baklava-57ad5c.netlify.app/reset-password?token={token}&email={email}"
+    print(f"Password reset link for {email}: {reset_link}")
+    
+    return {"message": "Password reset link sent", "reset_link": reset_link}
+
+@app.post("/api/auth/reset-password")
+def reset_password(email: str, token: str, new_password: str, db: Session = Depends(SessionLocal)):
+    reset = db.query(PasswordReset).filter(
+        PasswordReset.email == email,
+        PasswordReset.token == token,
+        PasswordReset.used == False,
+        PasswordReset.expires_at > datetime.utcnow()
+    ).first()
+    
+    if not reset:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user.hashed_password = hash_password(new_password)
+    reset.used = True
+    db.commit()
+    
+    return {"message": "Password reset successful"}
 
 # ========== Booking Routes ==========
 @app.post("/api/booking/", response_model=BookingResponse)
@@ -452,6 +507,39 @@ def confirm_booking(booking_id: int, db: Session = Depends(SessionLocal), admin:
         db.commit()
     return {"message": "Booking confirmed"}
 
+# ========== Stats Routes ==========
+@app.get("/api/stats")
+def get_public_stats(db: Session = Depends(SessionLocal)):
+    total_users = db.query(User).count()
+    total_resumes = db.query(ATSAnalysis).count()
+    total_bookings = db.query(Booking).count()
+    confirmed_bookings = db.query(Booking).filter(Booking.status == "confirmed").count()
+    
+    success_rate = int((confirmed_bookings / total_bookings) * 100) if total_bookings > 0 else 87
+    
+    return {
+        "total_users": total_users,
+        "resumes_built": total_resumes if total_resumes > 0 else 2400,
+        "success_rate": success_rate,
+        "templates_count": 50,
+        "avg_rating": 4.9,
+    }
+
+# ========== Testimonials Routes ==========
+@app.get("/api/testimonials")
+def get_testimonials(limit: int = 3, db: Session = Depends(SessionLocal)):
+    testimonials = [
+        {"name": "Rahul K.", "designation": "Software Engineer", "comment": "After using CareerPilot, I got 4 interview calls in week one! The resume templates are amazing.", "rating": 5},
+        {"name": "Priya S.", "designation": "Business Analyst", "comment": "The career roadmap and mock sessions built real confidence. Cleared my first interview in just 3 weeks!", "rating": 5},
+        {"name": "Aditya M.", "designation": "Product Manager", "comment": "CareerPilot helped me map my transferable skills and rebuild my profile. Landed my dream role!", "rating": 5},
+        {"name": "Neha V.", "designation": "Data Analyst", "comment": "The ATS checker showed me exactly what was wrong with my resume. Fixed it in one day!", "rating": 5},
+        {"name": "Vikram S.", "designation": "Frontend Developer", "comment": "Best free resume builder I've ever used. Got me noticed by top recruiters.", "rating": 5},
+        {"name": "Anjali R.", "designation": "Marketing Manager", "comment": "Interview practice feature is a game changer! Felt so prepared and confident.", "rating": 5},
+    ]
+    import random
+    random.shuffle(testimonials)
+    return testimonials[:limit]
+
 # ========== Health ==========
 @app.get("/health")
 def health():
@@ -459,4 +547,4 @@ def health():
 
 @app.get("/")
 def root():
-    return {"message": "CareerPilot AI API is running!"}
+    return {"message": "CareerPilot API is running!"}
