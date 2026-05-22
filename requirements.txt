@@ -1,5 +1,5 @@
 fastapi
 uvicorn
 python-multipart
-bcrrypt
+bcrypt
 python-jose[cryptography]
